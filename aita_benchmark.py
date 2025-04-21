@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 import argparse
 import asyncio
@@ -109,7 +108,8 @@ async def call_openrouter_api(
     api_key: str,
     model: str,
     prompt: str,
-    semaphore: asyncio.Semaphore
+    semaphore: asyncio.Semaphore,
+    log_file=None
 ) -> Optional[str]:
     """Makes a single API call to OpenRouter, respecting the semaphore."""
     async with semaphore:
@@ -126,7 +126,12 @@ async def call_openrouter_api(
             async with session.post(OPENROUTER_API_URL, json=payload, headers=headers) as response:
                 if response.status == 200:
                     result = await response.json()
-                    return result.get("choices", [{}])[0].get("message", {}).get("content")
+                    reply = result.get("choices", [{}])[0].get("message", {}).get("content")
+                    log_entry = f"\n--- Prompt to {model} ---\n{prompt}\n--- Reply from {model} ---\n{reply}\n"
+                    if log_file:
+                        log_file.write(log_entry)
+                        log_file.flush()
+                    return reply
                 else:
                     error_text = await response.text()
                     print(f"Error calling {model}: {response.status} - {error_text[:200]}...")
@@ -144,7 +149,8 @@ async def process_story(
     api_key: str,
     story: Dict[str, str],
     models: List[str],
-    semaphore: asyncio.Semaphore
+    semaphore: asyncio.Semaphore,
+    log_file=None
 ) -> List[Dict[str, Any]]:
     """Processes a single story across all models and both perspectives."""
     results = []
@@ -155,7 +161,7 @@ async def process_story(
     for model in models:
         tasks.append(
              asyncio.create_task(
-                 call_openrouter_api(session, api_key, model, prompt_user, semaphore),
+                 call_openrouter_api(session, api_key, model, prompt_user, semaphore, log_file),
                  name=f"{model}_user"
              )
         )
@@ -165,7 +171,7 @@ async def process_story(
     for model in models:
         tasks.append(
             asyncio.create_task(
-                call_openrouter_api(session, api_key, model, prompt_other, semaphore),
+                call_openrouter_api(session, api_key, model, prompt_other, semaphore, log_file),
                 name=f"{model}_other"
             )
         )
@@ -239,8 +245,17 @@ async def main():
         default=os.getenv("OPENROUTER_API_KEY"),
         help="OpenRouter API key. Defaults to OPENROUTER_API_KEY environment variable."
     )
+    parser.add_argument(
+        "--log",
+        action="store_true",
+        help="If set, write prompts and replies to a log file (aita_benchmark.log)."
+    )
 
     args = parser.parse_args()
+
+    log_file = None
+    if args.log:
+        log_file = open("aita_benchmark.log", "w", encoding="utf-8")  # Overwrite each run
 
     if not args.api_key:
         raise ValueError("OpenRouter API key not found. Set OPENROUTER_API_KEY environment variable or use --api_key.")
@@ -269,7 +284,7 @@ async def main():
 
     async with aiohttp.ClientSession() as session:
         tasks = [
-            process_story(session, args.api_key, story, args.models, semaphore)
+            process_story(session, args.api_key, story, args.models, semaphore, log_file)
             for story in stories
         ]
         # Use tqdm_asyncio for progress bar
@@ -280,6 +295,9 @@ async def main():
         for story_results in story_results_list:
             all_results.extend(story_results)
 
+
+    if log_file:
+        log_file.close()
 
     # --- Process Results ---
     if not all_results:
